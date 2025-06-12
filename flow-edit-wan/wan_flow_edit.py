@@ -25,8 +25,8 @@ class FlowEditWan:
         """
         self.pipeline = pipeline
         self.device = device
-        self.vae_scaling_factor = getattr(pipeline.vae.config, 'scaling_factor', 0.13025)
-        self.vae_shift_factor = getattr(pipeline.vae.config, 'shift_factor', 0.0)
+        # WanVAE doesn't have config, uses direct normalization
+        # Scaling is handled internally by the VAE's encode/decode methods
         
     def encode_video(self, video_frames: torch.Tensor) -> torch.Tensor:
         """
@@ -120,43 +120,31 @@ class FlowEditWan:
         Returns:
             Predicted velocity
         """
-        # Prepare timestep
-        if timestep.dim() == 0:
-            timestep = timestep.repeat(latents.shape[0])
+        # Prepare model arguments similar to how Wan I2V does it
+        arg_dict = {
+            'context': prompt_embeds["text_states"],
+            'context_mask': prompt_embeds.get("text_mask"),
+            'context_null': prompt_embeds.get("text_states"),  # Use same for now, CFG handled outside
+            'context_null_mask': prompt_embeds.get("text_mask"),
+            'context_clip': None,  # No CLIP context for FlowEdit
+            'guide_scale': guidance_scale,
+        }
         
-        # For Wan models, timesteps are typically scaled
-        timestep_scaled = timestep * 1000.0
-        
-        # Prepare guidance - Wan uses guidance scaled by 1000
-        guidance = torch.tensor([guidance_scale] * latents.shape[0], 
-                               device=self.device, dtype=timestep.dtype) * 1000.0
-        
-        # Get rotary position embeddings - Wan requires these
-        from wan.modules.model import rope_params
-        
-        # Calculate grid sizes for RoPE
-        num_frames = latents.shape[2]
-        height = latents.shape[3] * 8  # VAE scale factor
-        width = latents.shape[4] * 8   # VAE scale factor
-        
-        # Create basic freqs (simplified for FlowEdit)
-        max_seq_len = num_frames * height * width // (self.pipeline.patch_size ** 2)
-        freqs = rope_params(max_seq_len, self.pipeline.transformer.inner_dim // self.pipeline.transformer.num_attention_heads)
-        freqs_cos, freqs_sin = freqs.real.to(self.device), freqs.imag.to(self.device)
+        # Add secondary text states if available
+        if prompt_embeds.get("text_states_2") is not None:
+            arg_dict['context_2'] = prompt_embeds["text_states_2"]
+            arg_dict['context_null_2'] = prompt_embeds["text_states_2"]
         
         with torch.no_grad():
-            # Wan transformer interface
-            velocity = self.pipeline.transformer(
-                latents,
-                timestep_scaled,
-                text_states=prompt_embeds["text_states"],
-                text_mask=prompt_embeds.get("text_mask"),
-                text_states_2=prompt_embeds.get("text_states_2"),
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
-                guidance=guidance,
-                return_dict=True
-            )["x"]
+            # Use Wan's actual model call interface
+            latent_model_input = [latents]
+            timestep_tensor = timestep.unsqueeze(0) if timestep.dim() == 0 else timestep
+            
+            velocity = self.pipeline.model(
+                latent_model_input, 
+                t=timestep_tensor, 
+                **arg_dict
+            )[0]
         
         return velocity
     
