@@ -302,7 +302,8 @@ class FlowEditWan:
         from wan.utils.fm_solvers import get_sampling_sigmas
         
         # Get sigmas for flow matching
-        sigmas = get_sampling_sigmas(steps, shift=flow_shift, device=self.device)
+        sigmas = get_sampling_sigmas(steps, shift=flow_shift)
+        sigmas = torch.from_numpy(sigmas).to(self.device)  # Convert to tensor on device
         timesteps = sigmas * 1000.0  # Wan expects timesteps in [0, 1000] range
         
         # Apply flow shift by modifying timestep schedule
