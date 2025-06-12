@@ -125,32 +125,24 @@ class FlowEditWan:
         Returns:
             Predicted velocity
         """
-        # Prepare model arguments similar to how Wan I2V does it
-        arg_dict = {
-            'context': prompt_embeds["text_states"],
-            'context_mask': prompt_embeds.get("text_mask"),
-            'context_null': prompt_embeds.get("text_states"),  # Use same for now, CFG handled outside
-            'context_null_mask': prompt_embeds.get("text_mask"),
-            'context_clip': None,  # No CLIP context for FlowEdit
-            'guide_scale': guidance_scale,
-        }
-        
-        # Add secondary text states if available
-        if prompt_embeds.get("text_states_2") is not None:
-            arg_dict['context_2'] = prompt_embeds["text_states_2"]
-            arg_dict['context_null_2'] = prompt_embeds["text_states_2"]
-        
         with torch.no_grad():
-            # Use Wan's actual model call interface
             # Remove batch dimension for model call: [1, C, T, H, W] -> [C, T, H, W]
             latents_no_batch = latents.squeeze(0) if latents.dim() == 5 else latents
             latent_model_input = [latents_no_batch]
             timestep_tensor = timestep.unsqueeze(0) if timestep.dim() == 0 else timestep
             
+            # Calculate sequence length for positional encoding
+            _, T, H, W = latents_no_batch.shape
+            seq_len = T * H * W // (self.pipeline.patch_size[1] * self.pipeline.patch_size[2])
+            
+            # Use WanModel's actual forward signature
             velocity = self.pipeline.model(
-                latent_model_input, 
-                t=timestep_tensor, 
-                **arg_dict
+                x=latent_model_input,
+                t=timestep_tensor,
+                context=[prompt_embeds["text_states"]],
+                seq_len=seq_len,
+                clip_fea=None,  # No CLIP features for FlowEdit
+                y=None  # No conditional input for FlowEdit
             )[0]
             
             # Add batch dimension back: [C, T, H, W] -> [1, C, T, H, W]
