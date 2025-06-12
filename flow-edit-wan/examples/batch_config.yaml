@@ -1,0 +1,100 @@
+# FlowEdit-Wan Batch Processing Configuration
+# Process multiple videos with different editing tasks
+
+# Global Model Configuration
+model_path: "./Wan2.1-I2V-14B-720P"
+model_type: "i2v-14B"
+output_dir: "output/batch_results"
+
+# Memory Settings
+force_offload: true
+use_cpu_text_encoder: false
+low_vram_mode: false
+device: "cuda"
+frame_rate: 16
+
+# Default Parameters (applied to all edits unless overridden)
+defaults:
+  steps: 30
+  skip_steps: 8
+  drift_steps: 4
+  n_avg: 1
+  source_guidance_scale: 6.0
+  target_guidance_scale: 12.0
+  drift_guidance_scale: 6.0
+  flow_shift: 6.0
+  drift_flow_shift: 3.0
+  seed: 42
+  negative_prompt: "blurry, low quality, distorted, artifacts"
+
+# List of Editing Tasks
+edits:
+  # Object Replacement Example
+  - input_video: "examples/cat_playing.mp4"
+    output: "cat_to_dog_playing.mp4"
+    source_prompt: "A fluffy orange cat playing with a ball of yarn on the floor"
+    target_prompt: "A fluffy orange dog playing with a ball of yarn on the floor"
+    skip_steps: 12
+    target_guidance_scale: 15.0
+
+  # Style Transfer Example
+  - input_video: "examples/person_walking.mp4"
+    output: "medieval_walking.mp4"
+    source_prompt: "A person walking down a modern city street"
+    target_prompt: "A person walking down a medieval cobblestone street"
+    skip_steps: 10
+    target_guidance_scale: 14.0
+
+  # Weather/Environment Change
+  - input_video: "examples/sunny_garden.mp4"
+    output: "snowy_garden.mp4"
+    source_prompt: "A beautiful garden scene on a sunny summer day"
+    target_prompt: "A beautiful garden scene during a gentle snowfall"
+    skip_steps: 6
+    target_guidance_scale: 10.0
+
+  # Color/Appearance Change
+  - input_video: "examples/red_car.mp4"
+    output: "blue_car.mp4"
+    source_prompt: "A red sports car driving on a highway"
+    target_prompt: "A blue sports car driving on a highway"
+    skip_steps: 4
+    target_guidance_scale: 8.0
+
+  # Artistic Style Change
+  - input_video: "examples/landscape.mp4"
+    output: "cartoon_landscape.mp4"
+    source_prompt: "A realistic mountain landscape with trees and a lake"
+    target_prompt: "A cartoon-style mountain landscape with trees and a lake"
+    skip_steps: 15
+    target_guidance_scale: 18.0
+
+  # Subtle Expression Change
+  - input_video: "examples/person_neutral.mp4"
+    output: "person_smiling.mp4"
+    source_prompt: "A person with a neutral expression looking at the camera"
+    target_prompt: "A person with a warm smile looking at the camera"
+    skip_steps: 3
+    target_guidance_scale: 7.0
+    drift_steps: 2
+
+# Advanced Example with Multiple Style Variations
+# - input_video: "examples/base_scene.mp4"
+#   output: "anime_style.mp4"
+#   source_prompt: "A person sitting in a coffee shop"
+#   target_prompt: "A person sitting in a coffee shop, anime style"
+#   skip_steps: 20
+#   target_guidance_scale: 20.0
+#   flow_shift: 8.0
+
+# Memory-optimized Example for Lower-end GPUs
+# - input_video: "examples/small_video.mp4"
+#   output: "memory_optimized.mp4"
+#   source_prompt: "A cat on a table"
+#   target_prompt: "A dog on a table"
+#   skip_steps: 8
+#   target_guidance_scale: 12.0
+#   # Override global settings for this specific edit
+#   force_offload: true
+#   use_cpu_text_encoder: true
+#   low_vram_mode: true

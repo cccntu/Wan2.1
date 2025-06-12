@@ -1,0 +1,55 @@
+# FlowEdit-Wan Example Configuration
+# This file shows all available parameters and their default values
+
+# Input/Output
+input_video: "examples/input.mp4"
+output: "output/edited_video.mp4"
+
+# Model Configuration
+model_path: "./Wan2.1-I2V-14B-720P"
+model_type: "i2v-14B"  # Options: i2v-14B, i2v-1.3B, t2v-14B, t2v-1.3B, flf2v-14B, vace-14B, vace-1.3B
+
+# Prompts
+source_prompt: "A fluffy orange cat sitting on a wooden chair in a cozy living room"
+target_prompt: "A fluffy orange dog sitting on a wooden chair in a cozy living room"
+negative_prompt: "blurry, low quality, distorted, artifacts, pixelated"
+
+# FlowEdit Parameters
+steps: 30              # Total denoising steps
+skip_steps: 8          # Initial steps to skip (higher = less change)
+drift_steps: 4         # Final refinement steps
+n_avg: 1               # Number of velocity predictions to average
+
+# Guidance Parameters
+source_guidance_scale: 6.0    # Source prompt adherence
+target_guidance_scale: 12.0   # Target prompt adherence (higher = stronger editing)
+drift_guidance_scale: 6.0     # Guidance for drift steps
+
+# Flow Parameters
+flow_shift: 6.0               # Main editing flow shift
+drift_flow_shift: 3.0         # Drift steps flow shift
+
+# Memory Optimization
+force_offload: true           # Force model offloading for memory efficiency
+use_cpu_text_encoder: false   # Keep text encoder on CPU
+low_vram_mode: false          # Enable aggressive VRAM optimizations
+
+# Other Parameters
+seed: 42                      # Random seed for reproducibility
+device: "cuda"               # Device: cuda or cpu
+max_frames: null             # Maximum frames to process (null = all)
+frame_rate: 16               # Output video frame rate
+
+# Parameter Presets for Different Use Cases:
+
+# For subtle edits (colors, expressions, small details):
+# skip_steps: 4
+# target_guidance_scale: 8.0
+
+# For moderate edits (style, clothing, object properties):
+# skip_steps: 8
+# target_guidance_scale: 12.0
+
+# For major edits (object replacement, scene transformation):
+# skip_steps: 15
+# target_guidance_scale: 18.0
