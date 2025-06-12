@@ -143,6 +143,20 @@ def main():
         )
         print(f"Loaded video: {video_frames.shape} frames")
         
+        # Check for memory optimization needs
+        _, _, T, H, W = video_frames.shape
+        estimated_memory_gb = (T * H * W * 3 * 4) / (1024**3)  # Rough estimate in GB
+        print(f"Estimated video memory usage: {estimated_memory_gb:.2f} GB")
+        
+        # Reduce resolution if needed for memory
+        if args.low_vram_mode or estimated_memory_gb > 4.0:
+            max_resolution = 384 if args.low_vram_mode else 512
+            video_frames = FlowEditWan.reduce_video_resolution(video_frames, max_resolution)
+        
+        # Clear any existing GPU memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # Load Wan model
         print("Loading Wan 2.1 model...")
         pipeline = load_wan_model(
@@ -157,6 +171,9 @@ def main():
         
         # Initialize FlowEdit
         flow_editor = FlowEditWan(pipeline, device=device)
+        
+        # Clear memory before processing
+        flow_editor.clear_memory()
         
         # Perform editing
         print("Starting FlowEdit process...")

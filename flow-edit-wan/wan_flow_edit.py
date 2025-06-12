@@ -25,6 +25,11 @@ class FlowEditWan:
         """
         self.pipeline = pipeline
         self.device = torch.device(device) if isinstance(device, str) else device
+        
+        # Get model's native dtype for memory efficiency
+        self.model_dtype = getattr(pipeline.config, 'param_dtype', torch.bfloat16)
+        print(f"Using model dtype: {self.model_dtype}")
+        
         # WanVAE doesn't have config, uses direct normalization
         # Scaling is handled internally by the VAE's encode/decode methods
         
@@ -43,7 +48,7 @@ class FlowEditWan:
                 self.pipeline.vae.model.to(self.device)
                 
             # CLIP model will be moved on demand to avoid memory issues
-            print(f"Models configured for device: {self.device}")
+            print(f"Models configured for device: {self.device}, dtype: {self.model_dtype}")
             
         except Exception as e:
             print(f"Warning: Could not ensure model device consistency: {e}")
@@ -67,8 +72,8 @@ class FlowEditWan:
             # Remove batch dimension: [1, C, T, H, W] -> [C, T, H, W]
             video_frames = video_frames.squeeze(0)
         
-        # Ensure tensor is on correct device and dtype
-        video_frames = video_frames.to(device=self.device, dtype=torch.float32)
+        # Ensure tensor is on correct device - use model's native dtype for memory efficiency
+        video_frames = video_frames.to(device=self.device, dtype=self.model_dtype)
         
         with torch.no_grad():
             # Wan VAE expects a list of [C, T, H, W] tensors
@@ -86,8 +91,8 @@ class FlowEditWan:
         Returns:
             Decoded video frames [C, T, H, W]
         """
-        # Ensure latents are on correct device
-        latents = latents.to(device=self.device)
+        # Ensure latents are on correct device and dtype
+        latents = latents.to(device=self.device, dtype=self.model_dtype)
         
         with torch.no_grad():
             # Wan VAE decode method expects list of latents
@@ -200,7 +205,7 @@ class FlowEditWan:
                 ], dim=1)
                 
                 # Encode the padded video - ensure consistent device and dtype
-                first_frame_padded = first_frame_padded.to(device=self.device)
+                first_frame_padded = first_frame_padded.to(device=self.device, dtype=self.model_dtype)
                 y_encoded = self.pipeline.vae.encode([first_frame_padded])[0]
                 
                 # Ensure mask and encoded tensor are on same device
@@ -272,13 +277,16 @@ class FlowEditWan:
             # Accumulate velocity difference
             V_delta_avg += (1.0 / n_avg) * (vt_tar - vt_src)
         
-        # ODE integration step - ensure consistent device and dtype
-        x_edit = x_edit.to(device=self.device, dtype=torch.float32)
-        V_delta_avg = V_delta_avg.to(device=self.device, dtype=torch.float32)
+        # ODE integration step - use model's native dtype for memory efficiency
+        original_dtype = x_edit.dtype
+        compute_dtype = self.model_dtype if self.model_dtype != torch.float16 else torch.float32
+        
+        x_edit = x_edit.to(device=self.device, dtype=compute_dtype)
+        V_delta_avg = V_delta_avg.to(device=self.device, dtype=compute_dtype)
         
         x_edit_new = x_edit + (timestep_prev - timestep) * V_delta_avg
         
-        return x_edit_new.to(device=self.device, dtype=x_src.dtype)
+        return x_edit_new.to(device=self.device, dtype=original_dtype)
     
     def drift_step(self,
                    x_edit: torch.Tensor,
@@ -303,12 +311,15 @@ class FlowEditWan:
         t_tensor = torch.tensor(timestep, device=self.device, dtype=x_edit.dtype)
         vt_tar = self.predict_velocity(x_edit, t_tensor, tar_embeds, guidance_scale, video_frames)
         
-        x_edit = x_edit.to(device=self.device, dtype=torch.float32)
-        vt_tar = vt_tar.to(device=self.device, dtype=torch.float32)
+        original_dtype = x_edit.dtype
+        compute_dtype = self.model_dtype if self.model_dtype != torch.float16 else torch.float32
+        
+        x_edit = x_edit.to(device=self.device, dtype=compute_dtype)
+        vt_tar = vt_tar.to(device=self.device, dtype=compute_dtype)
         
         x_edit_new = x_edit + (timestep_prev - timestep) * vt_tar
         
-        return x_edit_new.to(device=self.device, dtype=x_edit.dtype)
+        return x_edit_new.to(device=self.device, dtype=original_dtype)
     
     def edit_video(self,
                    video_frames: torch.Tensor,
@@ -355,6 +366,9 @@ class FlowEditWan:
         x_src = self.encode_video(video_frames)
         print(f"Encoded latents shape: {x_src.shape}")
         
+        # Clear memory after encoding
+        self.clear_memory()
+        
         # Ensure latents have batch dimension for flow edit operations
         if x_src.dim() == 4:
             x_src = x_src.unsqueeze(0)  # [C, T, H, W] -> [1, C, T, H, W]
@@ -364,12 +378,15 @@ class FlowEditWan:
         src_embeds = self.encode_prompts(source_prompt)
         tar_embeds = self.encode_prompts(target_prompt)
         
+        # Clear memory after prompt encoding
+        self.clear_memory()
+        
         # Setup timesteps - Wan uses different scheduling
         from wan.utils.fm_solvers import get_sampling_sigmas
         
         # Get sigmas for flow matching
         sigmas = get_sampling_sigmas(steps, shift=flow_shift)
-        sigmas = torch.from_numpy(sigmas).to(device=self.device, dtype=torch.float32)  # Convert to tensor on device with explicit dtype
+        sigmas = torch.from_numpy(sigmas).to(device=self.device, dtype=self.model_dtype)  # Use model's native dtype
         timesteps = sigmas * 1000.0  # Wan expects timesteps in [0, 1000] range
         
         # Apply flow shift by modifying timestep schedule
@@ -425,6 +442,9 @@ class FlowEditWan:
                 
                 pbar.update(1)
         
+        # Clear memory after editing loop
+        self.clear_memory()
+        
         # Decode back to video
         print("Decoding latents to video...")
         edited_video = self.decode_video(x_edit)
@@ -434,3 +454,52 @@ class FlowEditWan:
             edited_video = edited_video.unsqueeze(0)
         
         return edited_video
+    
+    def clear_memory(self):
+        \"\"\"Clear GPU memory cache.\"\"\"
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    
+    @staticmethod
+    def reduce_video_resolution(video_tensor: torch.Tensor, max_size: int = 512) -> torch.Tensor:
+        \"\"\"
+        Reduce video resolution to save memory.
+        
+        Args:
+            video_tensor: Video tensor [B, C, T, H, W]
+            max_size: Maximum height/width
+            
+        Returns:
+            Resized video tensor
+        \"\"\"
+        B, C, T, H, W = video_tensor.shape
+        
+        if max(H, W) <= max_size:
+            return video_tensor
+            
+        # Calculate new dimensions while maintaining aspect ratio
+        if H > W:
+            new_H = max_size
+            new_W = int(W * (max_size / H))
+        else:
+            new_W = max_size
+            new_H = int(H * (max_size / W))
+            
+        # Ensure dimensions are divisible by 8 for VAE
+        new_H = (new_H // 8) * 8
+        new_W = (new_W // 8) * 8
+        
+        print(f\"Reducing video resolution from {H}x{W} to {new_H}x{new_W} to save memory\")
+        
+        # Reshape for interpolation: [B*T, C, H, W]
+        video_reshaped = video_tensor.transpose(1, 2).reshape(B * T, C, H, W)
+        
+        # Resize
+        import torch.nn.functional as F
+        video_resized = F.interpolate(video_reshaped, size=(new_H, new_W), mode='bilinear', align_corners=False)
+        
+        # Reshape back: [B, C, T, H, W]
+        video_resized = video_resized.reshape(B, T, C, new_H, new_W).transpose(1, 2)
+        
+        return video_resized
