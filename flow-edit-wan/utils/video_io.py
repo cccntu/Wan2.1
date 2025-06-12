@@ -87,6 +87,9 @@ def load_video(video_path: str,
     # Rearrange to [1, C, T, H, W]
     frames_tensor = frames_tensor.permute(3, 0, 1, 2).unsqueeze(0)  # [1, C, T, H, W]
     
+    # Ensure tensor is contiguous for better performance
+    frames_tensor = frames_tensor.contiguous()
+    
     print(f"Loaded video: {len(frames)} frames, shape: {frames_tensor.shape}")
     
     return frames_tensor

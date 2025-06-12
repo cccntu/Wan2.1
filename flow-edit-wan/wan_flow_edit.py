@@ -24,9 +24,29 @@ class FlowEditWan:
             device: Device to run on
         """
         self.pipeline = pipeline
-        self.device = device
+        self.device = torch.device(device) if isinstance(device, str) else device
         # WanVAE doesn't have config, uses direct normalization
         # Scaling is handled internally by the VAE's encode/decode methods
+        
+        # Ensure key models are on the correct device
+        self._ensure_model_device_consistency()
+    
+    def _ensure_model_device_consistency(self):
+        """Ensure all model components are on the correct device with consistent dtypes."""
+        try:
+            # Ensure main model is on correct device
+            if hasattr(self.pipeline, 'model'):
+                self.pipeline.model.to(self.device)
+                
+            # Ensure VAE is on correct device  
+            if hasattr(self.pipeline, 'vae'):
+                self.pipeline.vae.model.to(self.device)
+                
+            # CLIP model will be moved on demand to avoid memory issues
+            print(f"Models configured for device: {self.device}")
+            
+        except Exception as e:
+            print(f"Warning: Could not ensure model device consistency: {e}")
         
     def encode_video(self, video_frames: torch.Tensor) -> torch.Tensor:
         """
@@ -47,9 +67,12 @@ class FlowEditWan:
             # Remove batch dimension: [1, C, T, H, W] -> [C, T, H, W]
             video_frames = video_frames.squeeze(0)
         
+        # Ensure tensor is on correct device and dtype
+        video_frames = video_frames.to(device=self.device, dtype=torch.float32)
+        
         with torch.no_grad():
             # Wan VAE expects a list of [C, T, H, W] tensors
-            latents = self.pipeline.vae.encode([video_frames.to(self.device)])[0]
+            latents = self.pipeline.vae.encode([video_frames])[0]
             
         return latents
     
@@ -63,9 +86,12 @@ class FlowEditWan:
         Returns:
             Decoded video frames [C, T, H, W]
         """
+        # Ensure latents are on correct device
+        latents = latents.to(device=self.device)
+        
         with torch.no_grad():
             # Wan VAE decode method expects list of latents
-            video_frames = self.pipeline.vae.decode([latents.to(self.device)])[0]
+            video_frames = self.pipeline.vae.decode([latents])[0]
             
         return video_frames
     
@@ -143,10 +169,21 @@ class FlowEditWan:
             if hasattr(self.pipeline, 'clip') and video_frames is not None:
                 # Extract CLIP features from first frame
                 first_frame = video_frames[:, :, 0:1, :, :] if video_frames.dim() == 5 else video_frames[:, 0:1, :, :]
+                
+                # Ensure CLIP model is on correct device
                 self.pipeline.clip.model.to(self.device)
-                # Convert to CLIP model's dtype (usually float16)
-                first_frame_clip = first_frame.squeeze(0).to(dtype=next(self.pipeline.clip.model.parameters()).dtype)
-                clip_fea = self.pipeline.clip.visual([first_frame_clip])
+                
+                # Get target device and dtype from CLIP model
+                clip_param = next(self.pipeline.clip.model.parameters())
+                target_device = clip_param.device
+                target_dtype = clip_param.dtype
+                
+                # Ensure first frame is on the correct device and dtype
+                first_frame_clip = first_frame.squeeze(0).to(device=target_device, dtype=target_dtype)
+                
+                # Extract CLIP features
+                with torch.no_grad():
+                    clip_fea = self.pipeline.clip.visual([first_frame_clip])
                 
                 # Create conditional input y (first frame + zeros + mask)
                 video_no_batch = video_frames.squeeze(0) if video_frames.dim() == 5 else video_frames
@@ -162,8 +199,12 @@ class FlowEditWan:
                     torch.zeros(3, T-1, video_no_batch.shape[2], video_no_batch.shape[3], device=self.device)  # Zeros for other frames
                 ], dim=1)
                 
-                # Encode the padded video
+                # Encode the padded video - ensure consistent device and dtype
+                first_frame_padded = first_frame_padded.to(device=self.device)
                 y_encoded = self.pipeline.vae.encode([first_frame_padded])[0]
+                
+                # Ensure mask and encoded tensor are on same device
+                msk = msk.to(device=y_encoded.device, dtype=y_encoded.dtype)
                 y = [torch.cat([msk, y_encoded], dim=0)]
             
             # Use WanModel's actual forward signature
@@ -231,13 +272,13 @@ class FlowEditWan:
             # Accumulate velocity difference
             V_delta_avg += (1.0 / n_avg) * (vt_tar - vt_src)
         
-        # ODE integration step
-        x_edit = x_edit.to(torch.float32)
-        V_delta_avg = V_delta_avg.to(torch.float32)
+        # ODE integration step - ensure consistent device and dtype
+        x_edit = x_edit.to(device=self.device, dtype=torch.float32)
+        V_delta_avg = V_delta_avg.to(device=self.device, dtype=torch.float32)
         
         x_edit_new = x_edit + (timestep_prev - timestep) * V_delta_avg
         
-        return x_edit_new.to(x_src.dtype)
+        return x_edit_new.to(device=self.device, dtype=x_src.dtype)
     
     def drift_step(self,
                    x_edit: torch.Tensor,
@@ -262,12 +303,12 @@ class FlowEditWan:
         t_tensor = torch.tensor(timestep, device=self.device, dtype=x_edit.dtype)
         vt_tar = self.predict_velocity(x_edit, t_tensor, tar_embeds, guidance_scale, video_frames)
         
-        x_edit = x_edit.to(torch.float32)
-        vt_tar = vt_tar.to(torch.float32)
+        x_edit = x_edit.to(device=self.device, dtype=torch.float32)
+        vt_tar = vt_tar.to(device=self.device, dtype=torch.float32)
         
         x_edit_new = x_edit + (timestep_prev - timestep) * vt_tar
         
-        return x_edit_new.to(x_edit.dtype)
+        return x_edit_new.to(device=self.device, dtype=x_edit.dtype)
     
     def edit_video(self,
                    video_frames: torch.Tensor,
@@ -328,7 +369,7 @@ class FlowEditWan:
         
         # Get sigmas for flow matching
         sigmas = get_sampling_sigmas(steps, shift=flow_shift)
-        sigmas = torch.from_numpy(sigmas).to(self.device)  # Convert to tensor on device
+        sigmas = torch.from_numpy(sigmas).to(device=self.device, dtype=torch.float32)  # Convert to tensor on device with explicit dtype
         timesteps = sigmas * 1000.0  # Wan expects timesteps in [0, 1000] range
         
         # Apply flow shift by modifying timestep schedule
