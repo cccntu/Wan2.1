@@ -144,7 +144,9 @@ class FlowEditWan:
                 # Extract CLIP features from first frame
                 first_frame = video_frames[:, :, 0:1, :, :] if video_frames.dim() == 5 else video_frames[:, 0:1, :, :]
                 self.pipeline.clip.model.to(self.device)
-                clip_fea = self.pipeline.clip.visual([first_frame.squeeze(0)])
+                # Convert to CLIP model's dtype (usually float16)
+                first_frame_clip = first_frame.squeeze(0).to(dtype=next(self.pipeline.clip.model.parameters()).dtype)
+                clip_fea = self.pipeline.clip.visual([first_frame_clip])
                 
                 # Create conditional input y (first frame + zeros + mask)
                 video_no_batch = video_frames.squeeze(0) if video_frames.dim() == 5 else video_frames
