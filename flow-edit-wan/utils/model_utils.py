@@ -13,10 +13,12 @@ from typing import Optional, Union
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 try:
+    import wan
     from wan.image2video import WanI2V
     from wan.text2video import WanT2V
     from wan.first_last_frame2video import WanFLF2V
     from wan.vace import WanVace
+    from wan.configs import WAN_CONFIGS
 except ImportError as e:
     print(f"Warning: Could not import Wan modules: {e}")
     print("Make sure you're running from the correct directory and Wan is installed")
@@ -99,42 +101,43 @@ def load_wan_model(model_path: str,
     if isinstance(device, str):
         device = torch.device(device)
     
-    # Set up loading arguments
+    # Get config for model type
+    if model_type not in WAN_CONFIGS:
+        raise ValueError(f"No config found for model type: {model_type}")
+    
+    config = WAN_CONFIGS[model_type]
+    
+    # Set up loading arguments - Wan models use constructor, not from_pretrained
     load_args = {
-        'ckpt_dir': model_path,
-        'device': device,
+        'config': config,
+        'checkpoint_dir': model_path,
+        'device_id': device.index if device.type == 'cuda' and device.index is not None else 0,
+        'rank': 0,
+        't5_fsdp': False,
+        'dit_fsdp': False,
+        'use_usp': False,
+        't5_cpu': use_cpu_text_encoder,
+        'init_on_cpu': True,
         **kwargs
     }
-    
-    # Memory optimization settings
-    if force_offload:
-        load_args['offload_model'] = True
-    
-    if use_cpu_text_encoder:
-        load_args['t5_cpu'] = True
-    
-    if low_vram_mode:
-        load_args['offload_model'] = True
-        load_args['t5_cpu'] = True
-        # Additional low VRAM settings could go here
     
     try:
         # Load appropriate pipeline based on model type
         if model_type.startswith('i2v'):
             print(f"Loading Image-to-Video model from {model_path}")
-            pipeline = WanI2V.from_pretrained(**load_args)
+            pipeline = WanI2V(**load_args)
             
         elif model_type.startswith('t2v'):
             print(f"Loading Text-to-Video model from {model_path}")
-            pipeline = WanT2V.from_pretrained(**load_args)
+            pipeline = WanT2V(**load_args)
             
         elif model_type.startswith('flf2v'):
             print(f"Loading First-Last-Frame-to-Video model from {model_path}")
-            pipeline = WanFLF2V.from_pretrained(**load_args)
+            pipeline = WanFLF2V(**load_args)
             
         elif model_type.startswith('vace'):
             print(f"Loading VACE model from {model_path}")
-            pipeline = WanVace.from_pretrained(**load_args)
+            pipeline = WanVace(**load_args)
             
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -142,11 +145,11 @@ def load_wan_model(model_path: str,
         # Apply memory optimizations
         if low_vram_mode:
             # Enable memory efficient attention if available
-            if hasattr(pipeline.transformer, 'enable_memory_efficient_attention'):
+            if hasattr(pipeline, 'transformer') and hasattr(pipeline.transformer, 'enable_memory_efficient_attention'):
                 pipeline.transformer.enable_memory_efficient_attention()
             
             # Enable gradient checkpointing if available
-            if hasattr(pipeline.transformer, 'enable_gradient_checkpointing'):
+            if hasattr(pipeline, 'transformer') and hasattr(pipeline.transformer, 'enable_gradient_checkpointing'):
                 pipeline.transformer.enable_gradient_checkpointing()
         
         # Clean up memory

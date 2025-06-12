@@ -43,10 +43,9 @@ class FlowEditWan:
             video_frames = video_frames.permute(0, 2, 1, 3, 4)
         
         with torch.no_grad():
-            latents = self.pipeline.vae.encode(video_frames.to(self.device)).latent_dist.mode()
+            # Wan VAE expects [B, C, T, H, W] format
+            latents = self.pipeline.vae.encode([video_frames.to(self.device)])[0]
             
-        # Apply scaling and shift
-        latents = (latents - self.vae_shift_factor) * self.vae_scaling_factor
         return latents
     
     def decode_video(self, latents: torch.Tensor) -> torch.Tensor:
@@ -59,11 +58,9 @@ class FlowEditWan:
         Returns:
             Decoded video frames
         """
-        # Reverse scaling and shift
-        latents_denorm = (latents / self.vae_scaling_factor) + self.vae_shift_factor
-        
         with torch.no_grad():
-            video_frames = self.pipeline.vae.decode(latents_denorm.to(self.device), return_dict=False)[0]
+            # Wan VAE decode method
+            video_frames = self.pipeline.vae.decode([latents.to(self.device)])[0]
             
         return video_frames
     
@@ -77,26 +74,20 @@ class FlowEditWan:
         Returns:
             Dictionary with encoded prompt embeddings
         """
-        # Use pipeline's encode_prompt method
-        if hasattr(self.pipeline, 'encode_prompt'):
-            # For I2V and other conditional pipelines
-            prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
-                self.pipeline.encode_prompt(
-                    prompt=prompt,
-                    device=self.device,
-                    do_classifier_free_guidance=True
-                )
-            
-            return {
-                "prompt_embeds": prompt_embeds,
-                "negative_prompt_embeds": negative_prompt_embeds,
-                "pooled_prompt_embeds": pooled_prompt_embeds,
-                "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds
-            }
+        # Wan text encoder interface
+        if not self.pipeline.t5_cpu:
+            self.pipeline.text_encoder.model.to(self.device)
+            context = self.pipeline.text_encoder([prompt], self.device)
+            # Don't offload during FlowEdit to avoid repeated loading
         else:
-            # Fallback for simpler pipelines
-            prompt_embeds = self.pipeline.text_encoder(prompt)
-            return {"prompt_embeds": prompt_embeds}
+            context = self.pipeline.text_encoder([prompt], torch.device('cpu'))
+            context = [t.to(self.device) for t in context]
+        
+        return {
+            "text_states": context[0],  # Primary text features
+            "text_mask": context[1] if len(context) > 1 else None,  # Attention mask
+            "text_states_2": context[2] if len(context) > 2 else None,  # Secondary text features
+        }
     
     def scale_noise_forward(self, sample: torch.Tensor, timestep: float, noise: torch.Tensor) -> torch.Tensor:
         """
@@ -136,54 +127,36 @@ class FlowEditWan:
         # For Wan models, timesteps are typically scaled
         timestep_scaled = timestep * 1000.0
         
-        # Prepare guidance
-        if hasattr(self.pipeline.transformer.config, 'guidance_embeds') and \
-           self.pipeline.transformer.config.guidance_embeds:
-            guidance = torch.tensor([guidance_scale] * latents.shape[0], 
-                                   device=self.device, dtype=latents.dtype) * 1000.0
-        else:
-            guidance = None
+        # Prepare guidance - Wan uses guidance scaled by 1000
+        guidance = torch.tensor([guidance_scale] * latents.shape[0], 
+                               device=self.device, dtype=timestep.dtype) * 1000.0
         
-        # Get rotary position embeddings if needed
-        freqs_cos, freqs_sin = None, None
-        if hasattr(self.pipeline, 'get_rotary_pos_embed'):
-            num_frames = latents.shape[2]
-            height = latents.shape[3] * self.pipeline.vae_scale_factor
-            width = latents.shape[4] * self.pipeline.vae_scale_factor
-            freqs_cos, freqs_sin = self.pipeline.get_rotary_pos_embed(num_frames, height, width)
-            freqs_cos = freqs_cos.to(self.device)
-            freqs_sin = freqs_sin.to(self.device)
+        # Get rotary position embeddings - Wan requires these
+        from wan.modules.model import rope_params
+        
+        # Calculate grid sizes for RoPE
+        num_frames = latents.shape[2]
+        height = latents.shape[3] * 8  # VAE scale factor
+        width = latents.shape[4] * 8   # VAE scale factor
+        
+        # Create basic freqs (simplified for FlowEdit)
+        max_seq_len = num_frames * height * width // (self.pipeline.patch_size ** 2)
+        freqs = rope_params(max_seq_len, self.pipeline.transformer.inner_dim // self.pipeline.transformer.num_attention_heads)
+        freqs_cos, freqs_sin = freqs.real.to(self.device), freqs.imag.to(self.device)
         
         with torch.no_grad():
-            # Call transformer
-            if "text_states" in prompt_embeds:
-                # HunyuanVideo-style interface
-                velocity = self.pipeline.transformer(
-                    latents,
-                    timestep_scaled,
-                    text_states=prompt_embeds.get("text_states", prompt_embeds["prompt_embeds"]),
-                    text_mask=prompt_embeds.get("text_mask"),
-                    text_states_2=prompt_embeds.get("text_states_2"),
-                    freqs_cos=freqs_cos,
-                    freqs_sin=freqs_sin,
-                    guidance=guidance,
-                    return_dict=True
-                )["x"]
-            else:
-                # Standard diffusers interface
-                velocity = self.pipeline.transformer(
-                    hidden_states=latents,
-                    timestep=timestep_scaled,
-                    encoder_hidden_states=prompt_embeds["prompt_embeds"],
-                    pooled_projections=prompt_embeds.get("pooled_prompt_embeds"),
-                    guidance=guidance,
-                    return_dict=False
-                )[0]
-                
-                # Apply classifier-free guidance if needed
-                if guidance_scale > 1.0 and velocity.shape[0] > latents.shape[0]:
-                    velocity_uncond, velocity_cond = velocity.chunk(2)
-                    velocity = velocity_uncond + guidance_scale * (velocity_cond - velocity_uncond)
+            # Wan transformer interface
+            velocity = self.pipeline.transformer(
+                latents,
+                timestep_scaled,
+                text_states=prompt_embeds["text_states"],
+                text_mask=prompt_embeds.get("text_mask"),
+                text_states_2=prompt_embeds.get("text_states_2"),
+                freqs_cos=freqs_cos,
+                freqs_sin=freqs_sin,
+                guidance=guidance,
+                return_dict=True
+            )["x"]
         
         return velocity
     
@@ -322,9 +295,12 @@ class FlowEditWan:
         src_embeds = self.encode_prompts(source_prompt)
         tar_embeds = self.encode_prompts(target_prompt)
         
-        # Setup timesteps
-        self.pipeline.scheduler.set_timesteps(steps, device=self.device)
-        timesteps = self.pipeline.scheduler.timesteps.float() / 1000.0  # Normalize to [0,1]
+        # Setup timesteps - Wan uses different scheduling
+        from wan.utils.fm_solvers import get_sampling_sigmas
+        
+        # Get sigmas for flow matching
+        sigmas = get_sampling_sigmas(steps, shift=flow_shift, device=self.device)
+        timesteps = sigmas * 1000.0  # Wan expects timesteps in [0, 1000] range
         
         # Apply flow shift by modifying timestep schedule
         if flow_shift != 1.0:
