@@ -42,8 +42,13 @@ class FlowEditWan:
             # Convert [B, T, C, H, W] to [B, C, T, H, W]
             video_frames = video_frames.permute(0, 2, 1, 3, 4)
         
+        # WanVAE expects list of [C, T, H, W] tensors (no batch dimension)
+        if video_frames.dim() == 5:
+            # Remove batch dimension: [1, C, T, H, W] -> [C, T, H, W]
+            video_frames = video_frames.squeeze(0)
+        
         with torch.no_grad():
-            # Wan VAE expects [B, C, T, H, W] format
+            # Wan VAE expects a list of [C, T, H, W] tensors
             latents = self.pipeline.vae.encode([video_frames.to(self.device)])[0]
             
         return latents
@@ -56,10 +61,10 @@ class FlowEditWan:
             latents: Latent tensor
             
         Returns:
-            Decoded video frames
+            Decoded video frames [C, T, H, W]
         """
         with torch.no_grad():
-            # Wan VAE decode method
+            # Wan VAE decode method expects list of latents
             video_frames = self.pipeline.vae.decode([latents.to(self.device)])[0]
             
         return video_frames
@@ -137,7 +142,9 @@ class FlowEditWan:
         
         with torch.no_grad():
             # Use Wan's actual model call interface
-            latent_model_input = [latents]
+            # Remove batch dimension for model call: [1, C, T, H, W] -> [C, T, H, W]
+            latents_no_batch = latents.squeeze(0) if latents.dim() == 5 else latents
+            latent_model_input = [latents_no_batch]
             timestep_tensor = timestep.unsqueeze(0) if timestep.dim() == 0 else timestep
             
             velocity = self.pipeline.model(
@@ -145,6 +152,10 @@ class FlowEditWan:
                 t=timestep_tensor, 
                 **arg_dict
             )[0]
+            
+            # Add batch dimension back: [C, T, H, W] -> [1, C, T, H, W]
+            if velocity.dim() == 4:
+                velocity = velocity.unsqueeze(0)
         
         return velocity
     
@@ -278,6 +289,10 @@ class FlowEditWan:
         x_src = self.encode_video(video_frames)
         print(f"Encoded latents shape: {x_src.shape}")
         
+        # Ensure latents have batch dimension for flow edit operations
+        if x_src.dim() == 4:
+            x_src = x_src.unsqueeze(0)  # [C, T, H, W] -> [1, C, T, H, W]
+        
         # Encode prompts
         print("Encoding prompts...")
         src_embeds = self.encode_prompts(source_prompt)
@@ -346,5 +361,9 @@ class FlowEditWan:
         # Decode back to video
         print("Decoding latents to video...")
         edited_video = self.decode_video(x_edit)
+        
+        # Add batch dimension back for compatibility: [C, T, H, W] -> [1, C, T, H, W]
+        if edited_video.dim() == 4:
+            edited_video = edited_video.unsqueeze(0)
         
         return edited_video
