@@ -456,14 +456,14 @@ class FlowEditWan:
         return edited_video
     
     def clear_memory(self):
-        \"\"\"Clear GPU memory cache.\"\"\"
+        """Clear GPU memory cache."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
     
     @staticmethod
     def reduce_video_resolution(video_tensor: torch.Tensor, max_size: int = 512) -> torch.Tensor:
-        \"\"\"
+        """
         Reduce video resolution to save memory.
         
         Args:
@@ -472,7 +472,7 @@ class FlowEditWan:
             
         Returns:
             Resized video tensor
-        \"\"\"
+        """
         B, C, T, H, W = video_tensor.shape
         
         if max(H, W) <= max_size:
@@ -490,7 +490,7 @@ class FlowEditWan:
         new_H = (new_H // 8) * 8
         new_W = (new_W // 8) * 8
         
-        print(f\"Reducing video resolution from {H}x{W} to {new_H}x{new_W} to save memory\")
+        print(f"Reducing video resolution from {H}x{W} to {new_H}x{new_W} to save memory")
         
         # Reshape for interpolation: [B*T, C, H, W]
         video_reshaped = video_tensor.transpose(1, 2).reshape(B * T, C, H, W)
