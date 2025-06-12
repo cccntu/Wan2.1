@@ -112,7 +112,8 @@ class FlowEditWan:
                         latents: torch.Tensor,
                         timestep: torch.Tensor, 
                         prompt_embeds: dict,
-                        guidance_scale: float = 7.5) -> torch.Tensor:
+                        guidance_scale: float = 7.5,
+                        video_frames: torch.Tensor = None) -> torch.Tensor:
         """
         Predict velocity using Wan 2.1 transformer.
         
@@ -132,8 +133,36 @@ class FlowEditWan:
             timestep_tensor = timestep.unsqueeze(0) if timestep.dim() == 0 else timestep
             
             # Calculate sequence length for positional encoding
-            _, T, H, W = latents_no_batch.shape
+            C, T, H, W = latents_no_batch.shape
             seq_len = T * H * W // (self.pipeline.patch_size[1] * self.pipeline.patch_size[2])
+            
+            # For I2V model, we need clip_fea and y
+            clip_fea = None
+            y = None
+            
+            if hasattr(self.pipeline, 'clip') and video_frames is not None:
+                # Extract CLIP features from first frame
+                first_frame = video_frames[:, :, 0:1, :, :] if video_frames.dim() == 5 else video_frames[:, 0:1, :, :]
+                self.pipeline.clip.model.to(self.device)
+                clip_fea = self.pipeline.clip.visual([first_frame.squeeze(0)])
+                
+                # Create conditional input y (first frame + zeros + mask)
+                video_no_batch = video_frames.squeeze(0) if video_frames.dim() == 5 else video_frames
+                
+                # Create mask: 1 for first frame, 0 for others
+                lat_h, lat_w = H, W
+                msk = torch.ones(1, T * 4, lat_h, lat_w, device=self.device)  # T*4 for VAE temporal compression
+                msk[:, 4:] = 0  # Set all frames except first to 0
+                
+                # Encode first frame and pad with zeros
+                first_frame_padded = torch.cat([
+                    video_no_batch[:, 0:1, :, :],  # First frame
+                    torch.zeros(3, T-1, video_no_batch.shape[2], video_no_batch.shape[3], device=self.device)  # Zeros for other frames
+                ], dim=1)
+                
+                # Encode the padded video
+                y_encoded = self.pipeline.vae.encode([first_frame_padded])[0]
+                y = [torch.cat([msk, y_encoded], dim=0)]
             
             # Use WanModel's actual forward signature
             velocity = self.pipeline.model(
@@ -141,8 +170,8 @@ class FlowEditWan:
                 t=timestep_tensor,
                 context=[prompt_embeds["text_states"]],
                 seq_len=seq_len,
-                clip_fea=None,  # No CLIP features for FlowEdit
-                y=None  # No conditional input for FlowEdit
+                clip_fea=clip_fea,
+                y=y
             )[0]
             
             # Add batch dimension back: [C, T, H, W] -> [1, C, T, H, W]
@@ -161,7 +190,8 @@ class FlowEditWan:
                       src_guidance_scale: float,
                       tar_guidance_scale: float,
                       n_avg: int = 1,
-                      generator: Optional[torch.Generator] = None) -> torch.Tensor:
+                      generator: Optional[torch.Generator] = None,
+                      video_frames: torch.Tensor = None) -> torch.Tensor:
         """
         Perform one FlowEdit step.
         
@@ -193,8 +223,8 @@ class FlowEditWan:
             # Predict velocities
             t_tensor = torch.tensor(timestep, device=self.device, dtype=x_src.dtype)
             
-            vt_src = self.predict_velocity(zt_src, t_tensor, src_embeds, src_guidance_scale)
-            vt_tar = self.predict_velocity(zt_tar, t_tensor, tar_embeds, tar_guidance_scale)
+            vt_src = self.predict_velocity(zt_src, t_tensor, src_embeds, src_guidance_scale, video_frames)
+            vt_tar = self.predict_velocity(zt_tar, t_tensor, tar_embeds, tar_guidance_scale, video_frames)
             
             # Accumulate velocity difference
             V_delta_avg += (1.0 / n_avg) * (vt_tar - vt_src)
@@ -212,7 +242,8 @@ class FlowEditWan:
                    timestep: float,
                    timestep_prev: float,
                    tar_embeds: dict,
-                   guidance_scale: float) -> torch.Tensor:
+                   guidance_scale: float,
+                   video_frames: torch.Tensor = None) -> torch.Tensor:
         """
         Perform drift step (regular sampling).
         
@@ -227,7 +258,7 @@ class FlowEditWan:
             Updated state
         """
         t_tensor = torch.tensor(timestep, device=self.device, dtype=x_edit.dtype)
-        vt_tar = self.predict_velocity(x_edit, t_tensor, tar_embeds, guidance_scale)
+        vt_tar = self.predict_velocity(x_edit, t_tensor, tar_embeds, guidance_scale, video_frames)
         
         x_edit = x_edit.to(torch.float32)
         vt_tar = vt_tar.to(torch.float32)
@@ -338,7 +369,7 @@ class FlowEditWan:
                         x_edit = x_edit + xt_src - x_src
                     
                     x_edit = self.drift_step(
-                        x_edit, t_val, t_prev_val, tar_embeds, drift_guidance_scale
+                        x_edit, t_val, t_prev_val, tar_embeds, drift_guidance_scale, video_frames
                     )
                 else:
                     # FlowEdit step: differential velocity
@@ -346,7 +377,7 @@ class FlowEditWan:
                         x_src, x_edit, t_val, t_prev_val,
                         src_embeds, tar_embeds,
                         source_guidance_scale, target_guidance_scale,
-                        n_avg, generator
+                        n_avg, generator, video_frames
                     )
                 
                 pbar.update(1)
